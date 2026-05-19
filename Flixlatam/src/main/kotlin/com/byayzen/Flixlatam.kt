@@ -1,4 +1,10 @@
 // ! Bu araç @ByAyzen tarafından | @CS-Karma için yazılmıştır.
+// Fixes aplicados por Lúmen:
+// - Detección de serie: /serie/ (sin 's') + fallback .se-c
+// - Detección de anime/dorama por URL: /anime/ y /dorama/
+// - isTvSeries en load() también detecta URLs de episodio /temporada/
+// - loadLinks: selector de iframe más robusto con .pframe iframe como fallback
+// - toMainPageResult: soporte para URLs /serie/ y /anime/
 
 package com.byayzen
 
@@ -84,7 +90,10 @@ class Flixlatam : MainAPI() {
         val href = fixUrlNull(linkElement.attr("href")) ?: return null
         val posterUrl = fixUrlNull(this.selectFirst("div.poster img")?.attr("src"))
 
-        val isTvSeries = href.contains("/series/") || href.contains("/animes/") || this.hasClass("tvshows")
+        // FIX: ahora el sitio usa /serie/ y /anime/ (sin 's' al final en singular)
+        val isTvSeries = href.contains("/serie/") || href.contains("/series/") ||
+                         href.contains("/anime/") || href.contains("/animes/") ||
+                         href.contains("/dorama/") || this.hasClass("tvshows")
         val type = if (isTvSeries) TvType.TvSeries else TvType.Movie
 
         val ratingValue = this.selectFirst("div.rating")?.text()?.toDoubleOrNull()
@@ -108,10 +117,15 @@ class Flixlatam : MainAPI() {
 
         val results = document.select("article.item").mapNotNull {
             val linkElement = it.selectFirst(".data h3 a") ?: it.selectFirst(".poster a") ?: return@mapNotNull null
-            val title = linkElement.text().ifEmpty { it.selectFirst(".poster img")?.attr("alt") }?.replace("Ver ", "")?.replace(" online", "")?.trim() ?: return@mapNotNull null
+            val title = linkElement.text().ifEmpty { it.selectFirst(".poster img")?.attr("alt") }
+                ?.replace("Ver ", "")?.replace(" online", "")?.trim() ?: return@mapNotNull null
             val href = fixUrlNull(linkElement.attr("href")) ?: return@mapNotNull null
             val poster = fixUrlNull(it.selectFirst(".poster img")?.attr("src"))
-            val isTv = href.contains("/serie/") || href.contains("/anime/")
+
+            // FIX: soporte para /serie/ y /anime/ además de los originales
+            val isTv = href.contains("/serie/") || href.contains("/series/") ||
+                       href.contains("/anime/") || href.contains("/animes/") ||
+                       href.contains("/dorama/")
             val type = if (isTv) TvType.TvSeries else TvType.Movie
 
             val year = it.selectFirst(".data span")?.text()?.trim()?.toIntOrNull()
@@ -151,7 +165,7 @@ class Flixlatam : MainAPI() {
         val html = response.text
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.replace(
-                Regex("(?i)▷? ?Ver | ?Audio Latino| ?Online| - Series Latinoamerica| - FlixLatam"),
+                Regex("(?i)▷? ?Ver | ?Audio Latino| ?Online| - Series Latinoamerica| - FlixLatam| - FLIXLATAM"),
                 ""
             )
             ?.trim() ?: return null
@@ -160,41 +174,45 @@ class Flixlatam : MainAPI() {
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")
             ?: document.selectFirst("div.wp-content p")?.text()?.trim()
 
-        val year =
-            Regex("""datePublished":"(\d{4})""").find(html)?.groupValues?.get(1)?.toIntOrNull()
+        val year = Regex("""datePublished":"(\d{4})""").find(html)?.groupValues?.get(1)?.toIntOrNull()
+            ?: document.selectFirst(".date, span.date")?.text()?.trim()?.toIntOrNull()
+
         val tags = document.select(".sgeneros a").map { it.text().trim() }
-        val rating =
-            document.selectFirst(".dt_rating_vgs")?.text()?.replace(",", ".")?.toDoubleOrNull()
-        val duration =
-            document.selectFirst(".runtime")?.text()?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+        val rating = document.selectFirst(".dt_rating_vgs, .rating-value")
+            ?.text()?.replace(Regex("[^0-9.,]"), "")?.replace(",", ".")?.toDoubleOrNull()
+        val duration = document.selectFirst(".runtime")?.text()?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
 
         val trailerUrl = document.selectFirst("iframe#iframe-trailer")?.attr("src")
             ?: Regex("""embed\/(.*?)[\?|\"]""").find(html)?.groupValues?.get(1)
                 ?.let { "https://www.youtube.com/embed/$it" }
 
-        val recommendations =
-            document.select(".srelacionados article, #single_relacionados article")
-                .mapNotNull { element ->
-                    val recTitle =
-                        element.selectFirst("img")?.attr("alt") ?: element.selectFirst(".data h3 a")
-                            ?.text() ?: return@mapNotNull null
-                    val recHref =
-                        fixUrlNull(element.selectFirst("a")?.attr("href")) ?: return@mapNotNull null
-                    val recPoster = fixUrlNull(element.selectFirst("img")?.attr("src"))
+        val recommendations = document.select(".srelacionados article, #single_relacionados article")
+            .mapNotNull { element ->
+                val recTitle = element.selectFirst("img")?.attr("alt")
+                    ?: element.selectFirst(".data h3 a")?.text() ?: return@mapNotNull null
+                val recHref = fixUrlNull(element.selectFirst("a")?.attr("href")) ?: return@mapNotNull null
+                val recPoster = fixUrlNull(element.selectFirst("img")?.attr("src"))
 
-                    newMovieSearchResponse(recTitle, recHref, TvType.Movie) {
-                        this.posterUrl = recPoster
-                    }
+                newMovieSearchResponse(recTitle, recHref, TvType.Movie) {
+                    this.posterUrl = recPoster
                 }
+            }
 
-        val isAnime = tags.any { it.contains("Anime", ignoreCase = true) }
-        val isAsian = tags.any {
-            it.contains("Doramas", ignoreCase = true) || it.contains(
-                "Asiatica",
-                ignoreCase = true
-            )
-        }
-        val isTvSeries = url.contains("/series/") || document.select("#seasons").isNotEmpty()
+        val isAnime = url.contains("/anime/") || url.contains("/animes/") ||
+                      tags.any { it.contains("Anime", ignoreCase = true) }
+
+        val isAsian = url.contains("/dorama/") ||
+                      tags.any {
+                          it.contains("Doramas", ignoreCase = true) || it.contains("Asiatica", ignoreCase = true)
+                      }
+
+        // FIX PRINCIPAL: detectar /serie/ (nuevo formato) además de /series/ (anterior)
+        // También detecta si la URL es de un episodio (/temporada/) o si hay secciones .se-c en la página
+        val isTvSeries = url.contains("/serie/") ||
+                         url.contains("/series/") ||
+                         url.contains("/temporada/") ||
+                         document.select(".se-c").isNotEmpty() ||
+                         document.select("#seasons").isNotEmpty()
 
         val episodesList = if (isTvSeries || isAnime || isAsian) {
             document.select("ul.episodios li").mapNotNull { li ->
@@ -202,6 +220,8 @@ class Flixlatam : MainAPI() {
                 val epHref = fixUrlNull(epLink?.attr("href")) ?: return@mapNotNull null
                 val epName = epLink?.text()?.trim()
                 val epThumb = fixUrlNull(li.selectFirst(".imagen img")?.attr("src"))
+
+                // El .numerando ahora viene como "2 - 1" con espacios, trim() lo maneja correctamente
                 val numerando = li.selectFirst(".numerando")?.text() ?: "1-1"
                 val seasonNum = numerando.substringBefore("-").trim().toIntOrNull() ?: 1
                 val episodeNum = numerando.substringAfter("-").trim().toIntOrNull() ?: 1
@@ -221,7 +241,6 @@ class Flixlatam : MainAPI() {
             isAnime -> newAnimeLoadResponse(title, url, TvType.Anime) {
                 this.episodes = mutableMapOf(DubStatus.None to episodesList)
             }
-
             isAsian -> newTvSeriesLoadResponse(title, url, TvType.AsianDrama, episodesList)
             isTvSeries -> newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodesList)
             else -> newMovieLoadResponse(title, url, TvType.Movie, url)
@@ -248,10 +267,17 @@ class Flixlatam : MainAPI() {
         Log.d("Cloudstream", "Yüklüyo: $data")
 
         val response = app.get(data, headers = mapOf("Referer" to mainUrl))
-        val iframeUrl = response.document.selectFirst("div.play iframe")?.attr("src")
-            ?: response.document.selectFirst("iframe[src*='embed69']")?.attr("src")
+        val document = response.document
 
-        if (iframeUrl == null) return false
+        // FIX: selector más robusto — primero div.play iframe, luego .pframe iframe como fallback
+        val iframeUrl = document.selectFirst("div.play iframe")?.attr("src")
+            ?: document.selectFirst(".pframe iframe")?.attr("src")
+            ?: document.selectFirst("iframe[src*='embed69']")?.attr("src")
+
+        if (iframeUrl == null) {
+            Log.d("Cloudstream", "No se encontró iframe en: $data")
+            return false
+        }
 
         val finalIframeUrl = if (iframeUrl.startsWith("//")) "https:$iframeUrl" else iframeUrl
         return resolveEmbed69(finalIframeUrl, data, subtitleCallback, callback)
